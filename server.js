@@ -19,7 +19,7 @@ if (!apiKeys.length) {
   console.warn('Gemini is not configured yet. Set GEMINI_API_KEYS.');
 }
 
-const MODEL_NAMES = (process.env.GEMINI_MODELS || 'gemini-3.5-flash,gemini-3.5-flash-lite,gemini-flash-lite-latest')
+const MODEL_NAMES = (process.env.GEMINI_MODELS || 'gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite,gemini-flash-lite-latest')
   .split(',').map(x => x.trim()).filter(Boolean);
 
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 60000);
@@ -166,29 +166,64 @@ const webModelsByName = MODEL_NAMES.map(name => genAIClients.map(ai =>
   ai.getGenerativeModel({model: name, tools: [{googleSearch: {}}]})
 ));
 
+// Model Quota Circuit Breaker:
+// Remembers models that exceeded quota (429) and skips them immediately (0 ms) for 1 hour
+const modelCooldowns = new Map();
+const COOLDOWN_DURATION_MS = Number(process.env.MODEL_COOLDOWN_MS || 3600000); // 1 hour
+
 async function generateWithRetry(contents, useWebSearch = false) {
   if (!modelsByName.length || !modelsByName[0]?.length) {
     throw Object.assign(new Error('Gemini is not configured. Set GEMINI_API_KEYS.'), {status: 400});
   }
   const groups = useWebSearch ? webModelsByName : modelsByName;
+  const now = Date.now();
   let lastError;
+
   for (let mi = 0; mi < groups.length; mi++) {
+    const modelName = MODEL_NAMES[mi];
     for (let ki = 0; ki < groups[mi].length; ki++) {
+      const cooldownKey = `${modelName}_key${ki}`;
+      const cooldownUntil = modelCooldowns.get(cooldownKey) || 0;
+
+      // If this model is currently cooling down due to 429 quota exhaustion, skip it instantly (0 ms)
+      if (cooldownUntil > now) {
+        const remainingMin = Math.round((cooldownUntil - now) / 60000);
+        addSystemLog('INFO', 'cooldown skip', `Skipping ${modelName} (quota cooldown active for another ${remainingMin}m)`);
+        continue;
+      }
+
       try {
-        // Use fast failover per model so a stalled model doesn't block the caller
-        return await withTimeout(
+        const result = await withTimeout(
           groups[mi][ki].generateContent(contents),
           PER_MODEL_TIMEOUT_MS,
-          `${MODEL_NAMES[mi]} key #${ki + 1}`
+          `${modelName} key #${ki + 1}`
         );
+        // Successful response! Clear cooldown if it existed
+        modelCooldowns.delete(cooldownKey);
+        return result;
       } catch (e) {
         lastError = e;
         const errDesc = e.status || e.message || 'error';
-        console.warn(`Attempt failed on ${MODEL_NAMES[mi]} (${errDesc}). Fast-switching to next model...`);
+        const isQuota = String(errDesc).includes('429') || String(errDesc).includes('Quota') || String(errDesc).includes('quota');
+
+        if (isQuota) {
+          modelCooldowns.set(cooldownKey, now + COOLDOWN_DURATION_MS);
+          addSystemLog('WARN', 'quota cooldown', `${modelName} hit quota limit (429). Pausing requests to it for ${Math.round(COOLDOWN_DURATION_MS / 60000)} minutes.`);
+        }
+
+        addSystemLog('WARN', 'model failover', `Attempt failed on ${modelName} (${errDesc}). Fast-switching to next model...`);
         await new Promise(r => setTimeout(r, 50));
       }
     }
   }
+
+  // If all models were skipped because of cooldowns and none responded, clear cooldowns and retry once
+  if (!lastError && modelCooldowns.size > 0) {
+    addSystemLog('WARN', 'cooldown reset', 'All models were in cooldown, clearing memory and retrying all models...');
+    modelCooldowns.clear();
+    return generateWithRetry(contents, useWebSearch);
+  }
+
   throw lastError;
 }
 
