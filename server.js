@@ -237,7 +237,7 @@ ${sessionTurns.map((t, idx) => `[סבב ${idx + 1}] מתקשר: ${t.user}\n[סב
 ${historySection}
 זוהי הקלטת שמע של שאלת המתקשר בטלפון.
 האזן להקלטה והבן את שאלת המתקשר (כולל הקשר השיחה הקודם אם קיים).
-ענה בשפה שבה המתקשר דיבר. התשובה מיועדת להקראה בטלפון, לכן נסח תשובה קולית טבעית, תמציתית, עניינית וברורה, ללא כוכביות, ללא Markdown, ללא קישורים, וללא נקודות או מרכאות מיותרות.
+ענה בשפה שבה המתקשר דיבר. התשובה מיועדת להקראה קולית מהירה בטלפון, לכן נסח תשובה קולית טבעית, זריזה, ממוקדת, תמציתית וברורה, ללא הקדמות מיותרות, ללא כוכביות, ללא Markdown, ללא קישורים, וללא נקודות או מרכאות מיותרות.
 
 החזר את התוצאה בפורמט JSON בלבד בצורה הבאה:
 {
@@ -747,12 +747,15 @@ async function configureYemotStructure() {
   }
 
   try {
-    console.log(`Setting IVR extension /1 to ${publicUrl}/yemot with wait audio...`);
+    console.log(`Setting IVR extension /1 to ${publicUrl}/yemot with wait music and fast TTS...`);
     await updateExtension('ivr2:/1', {
       type: 'api',
       api_link: publicUrl + '/yemot',
       api_wait_play: 'yes',
-      api_timeout: '25'
+      api_wait_answer_music_on_hold: 'yes',
+      api_timeout: '25',
+      tts_rate: '2',
+      rate: '2'
     });
     console.log('IVR extension /1 successfully configured with wait music!');
   } catch (err) {
