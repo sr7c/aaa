@@ -751,8 +751,10 @@ async function configureYemotStructure() {
     await updateExtension('ivr2:/1', {
       type: 'api',
       api_link: publicUrl + '/yemot',
+      api_wait: 'yes',
       api_wait_play: 'yes',
       api_wait_answer_music_on_hold: 'yes',
+      api_wait_answer_music_on_hold_different: 'M0000',
       api_timeout: '60',
       tts_rate: '2',
       rate: '2'
