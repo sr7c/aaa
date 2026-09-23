@@ -146,8 +146,18 @@ function withTimeout(promise, ms, label) {
   return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
 }
 
+const systemLogs = [];
+function addSystemLog(level, context, msg) {
+  const line = `[${new Date().toISOString()}] [${level}] [${context}] ${msg}`;
+  systemLogs.push(line);
+  if (systemLogs.length > 200) systemLogs.shift();
+  if (level === 'ERROR') console.error(line);
+  else if (level === 'WARN') console.warn(line);
+  else console.log(line);
+}
+
 function logDetailedError(context, err) {
-  console.error(`[${context}]`, err?.message || err);
+  addSystemLog('ERROR', context, err?.message || err);
 }
 
 const genAIClients = apiKeys.map(key => new GoogleGenerativeAI(key));
@@ -423,6 +433,15 @@ app.get('/api/conversations', (req, res) => {
     models: MODEL_NAMES,
     serverTime: new Date().toISOString()
   });
+});
+
+// System logs API - protected with password check
+app.get('/api/logs', (req, res) => {
+  const key = req.headers['x-dashboard-key'] || req.query.key;
+  if (key !== DASHBOARD_PASSWORD) {
+    return res.status(401).json({ error: 'דרושה סיסמת גישה' });
+  }
+  res.json({ logs: systemLogs });
 });
 
 // Quick AI test API - protected
