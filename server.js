@@ -21,7 +21,10 @@ if (!apiKeys.length) {
 
 const MODEL_NAMES = (process.env.GEMINI_MODELS || 'gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash')
   .split(',').map(x => x.trim()).filter(Boolean);
-const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 12000);
+
+const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 25000);
+const PER_MODEL_TIMEOUT_MS = Number(process.env.PER_MODEL_TIMEOUT_MS || 9000);
+const DASHBOARD_PASSWORD = (process.env.DASHBOARD_PASSWORD || '1234').trim();
 
 const CONTENT_FILTER_INSTRUCTION = `כלל סינון תוכן מחייב: אין לספק, לעודד או לפרט תוכן שאינו תואם ערכי צניעות וחינוך.
 
@@ -39,6 +42,17 @@ const EXCLUSIVE_INSTRUCTION = [CONTENT_FILTER_INSTRUCTION, process.env.AI_SYSTEM
 const conversationLog = [];
 const activeCalls = new Map();
 const MAX_CONVERSATION_LOG = 1000;
+
+// Periodic cleanup of stale active calls (older than 90 seconds of inactivity)
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, call] of activeCalls.entries()) {
+    if (call.lastActivity && now - call.lastActivity > 90000) {
+      console.log(`Pruning stale call: ${key} (${call.phone})`);
+      activeCalls.delete(key);
+    }
+  }
+}, 30000);
 
 const SUPABASE_URL = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
 const SUPABASE_KEY = (process.env.SUPABASE_KEY || '').trim();
@@ -151,19 +165,20 @@ async function generateWithRetry(contents, useWebSearch = false) {
   for (let mi = 0; mi < groups.length; mi++) {
     for (let ki = 0; ki < groups[mi].length; ki++) {
       try {
+        // Use fast failover per model so a stalled model doesn't block the caller
         return await withTimeout(
           groups[mi][ki].generateContent(contents),
-          REQUEST_TIMEOUT_MS,
+          PER_MODEL_TIMEOUT_MS,
           `${MODEL_NAMES[mi]} key #${ki + 1}`
         );
       } catch (e) {
         lastError = e;
         const status = e.status || (e.message && e.message.includes('503') ? 503 : 0);
-        console.warn(`Attempt failed on ${MODEL_NAMES[mi]} key #${ki + 1} (${status || e.message}). Trying fallback...`);
-        if (![404, 503, 429, 500, 408].includes(status) && !e.message?.includes('503')) {
+        console.warn(`Attempt failed on ${MODEL_NAMES[mi]} (${status || e.message}). Fast-switching to next model...`);
+        if (![404, 503, 429, 500, 408].includes(status) && !e.message?.includes('503') && !e.isTimeout) {
           throw e;
         }
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise(r => setTimeout(r, 100));
       }
     }
   }
@@ -205,16 +220,28 @@ function audioParts(audioBase64) {
   return [{inlineData: {mimeType: process.env.YEMOT_AUDIO_MIME_TYPE || 'audio/wav', data: audioBase64}}];
 }
 
-async function processCallerAudio(audioBase64) {
-  const prompt = `${EXCLUSIVE_INSTRUCTION}
+// Multi-turn audio processing with conversation history memory!
+async function processCallerAudio(audioBase64, sessionTurns = []) {
+  let historySection = '';
+  if (sessionTurns.length > 0) {
+    historySection = `
+שים לב: זוהי שיחה פעילה ומתמשכת! הנה השאלות והתשובות שכבר נאמרו בשיחה זו:
+${sessionTurns.map((t, idx) => `[סבב ${idx + 1}] מתקשר: ${t.user}\n[סבב ${idx + 1}] תשובתך: ${t.reply}`).join('\n\n')}
 
-זוהי הקלטת שמע של שאלת מתקשר בטלפון.
-האזן להקלטה והבן את שאלת המתקשר.
-ענה בשפה שבה המתקשר דיבר. התשובה מיועדת להקראה בטלפון, לכן נסח תשובה קולית טבעית, תמציתית וברורה, ללא כוכביות, ללא Markdown, ללא קישורים, וללא נקודות או מרכאות מיותרות.
+המתקשר שואל כעת את שאלת ההמשך בהקלטת השמע.
+עליך להבין את דבריו בהקשר מלא להיסטוריה שנאמרה לעיל (כולל כינויי גוף, נושאים שהוזכרו, שאלות המשך, או שאלות על מה שנאמר קודם).
+`;
+  }
+
+  const prompt = `${EXCLUSIVE_INSTRUCTION}
+${historySection}
+זוהי הקלטת שמע של שאלת המתקשר בטלפון.
+האזן להקלטה והבן את שאלת המתקשר (כולל הקשר השיחה הקודם אם קיים).
+ענה בשפה שבה המתקשר דיבר. התשובה מיועדת להקראה בטלפון, לכן נסח תשובה קולית טבעית, תמציתית, עניינית וברורה, ללא כוכביות, ללא Markdown, ללא קישורים, וללא נקודות או מרכאות מיותרות.
 
 החזר את התוצאה בפורמט JSON בלבד בצורה הבאה:
 {
-  "transcript": "תמלול קצר של מה שהמתקשר אמר",
+  "transcript": "תמלול קצר ומדויק של מה שהמתקשר אמר",
   "reply": "התשובה המילולית להקראה בטלפון"
 }
 
@@ -238,114 +265,127 @@ async function processCallerAudio(audioBase64) {
   }
 }
 
-async function answerWithWebSearch(searchContext, audioBase64) {
+async function answerWithWebSearch(searchContext, audioBase64, sessionTurns = []) {
+  let historySection = '';
+  if (sessionTurns.length > 0) {
+    historySection = `היסטוריית שיחה:\n` + sessionTurns.map(t => `מתקשר: ${t.user}\nAI: ${t.reply}`).join('\n');
+  }
+
   const result = await generateWithRetry([
     ...audioParts(audioBase64),
     { text: `${EXCLUSIVE_INSTRUCTION}
+${historySection}
 המתקשר ביקש חיפוש באינטרנט בנושא: ${searchContext}.
 חפש מידע עדכני באמצעות Google Search וענה בעברית בצורה ברורה להקראה קולית בטלפון. בלי קישורים ובלי עיצוב Markdown.` }
   ], true);
   return result.response.text();
 }
 
-async function buildOpeningForCaller(phone) {
-  const previous = conversationLog.filter(x => x.phone === normalizePhone(phone)).slice(-8);
-  if (!previous.length) {
-    return process.env.FIRST_CALL_MESSAGE ||
-      'שלום איך אפשר לעזור לך היום אמור בבקשה על מה תרצה לדבר אחרי הצפצוף ולסיום ההקלטה הקש סולמית';
-  }
-  const history = previous.map(x => 'המתקשר: ' + x.user + '\nAI: ' + x.gemini).join('\n\n');
-  try {
-    const r = await generateWithRetry([{ text: `${EXCLUSIVE_INSTRUCTION}
-אתה בתחילת שיחה חדשה עם מתקשר שכבר דיבר איתך בעבר.
-הנה קטעים מהשיחות הקודמות:
-${history}
-צור פתיח קצר בעברית שמזכיר בקצרה את הנושא האחרון ומאפשר להמשיך משם, ושואל על מה תרצה לדבר עכשיו. בלי נקודות ובלי מרכאות.` }]);
-    return sanitizeForYemot(r.response.text()) || 'שלום שוב שמח לשמוע ממך על מה תרצה לדבר עכשיו';
-  } catch {
-    return 'שלום שוב שמח לשמוע ממך על מה תרצה לדבר עכשיו';
-  }
-}
-
 async function callHandler(call) {
   const callerPhone = getCallerNumber(call);
   const callId = call?.callId || call?.values?.ApiCallId || '';
   const activeKey = String(callId || (Date.now() + '-' + callerPhone));
+
   activeCalls.set(activeKey, {
     id: activeKey,
     phone: callerPhone,
     callId: String(callId || ''),
     startedAt: new Date().toISOString(),
-    status: 'ממתין להקלטה'
+    lastActivity: Date.now(),
+    status: 'נכנס לשיחה'
   });
 
-  let firstTurn = true;
-  let openingPrompt = null;
-  if (conversationLog.some(x => x.phone === callerPhone)) {
-    openingPrompt = await buildOpeningForCaller(callerPhone);
-  }
+  const sessionTurns = [];
 
-  while (true) {
-    const prompt = firstTurn
-      ? (openingPrompt || process.env.FIRST_CALL_MESSAGE || 'שלום איך אפשר לעזור לך היום אמור בבקשה על מה תרצה לדבר אחרי הצפצוף ולסיום ההקלטה הקש סולמית')
-      : 'אמור שאלה נוספת ולסיום הקש סולמית או הקש כוכבית ליציאה';
-    firstTurn = false;
+  try {
+    // 1. Professional Welcome Announcement on entrance to the line
+    const welcomeAnnouncement = process.env.WELCOME_MESSAGE || 
+      'שלום וברוכים הבאים לקו הטלפון האישי עם בינה מלאכותית כאן תוכלו לשאול כל שאלה להתייעץ ולנהל שיחה חופשית';
+    await call.id_list_message([{ type: 'text', data: sanitizeForYemot(welcomeAnnouncement) }]);
 
-    const recordPath = await call.read(
-      [{ type: 'text', data: prompt }],
-      'record',
-      { min_length: 1, max_length: 60, no_confirm_menu: true }
-    );
-
-    if (!recordPath || recordPath === 'None') {
-      activeCalls.delete(activeKey);
-      return call.id_list_message([{ type: 'text', data: 'לא נקלט דבר להתראות' }]);
-    }
-
-    const active = activeCalls.get(activeKey);
-    if (active) active.status = 'הקלטה התקבלה — מוריד שמע';
-
-    let audioBuffer;
-    try {
-      audioBuffer = await downloadYemotRecording(recordPath);
-    } catch (e) {
-      logDetailedError('recording download', e);
-      await call.id_list_message([{ type: 'text', data: 'תקלה בהורדת ההקלטה נסה שוב' }], { prependToNextAction: true });
-      continue;
-    }
-
-    const audioBase64 = audioBuffer.toString('base64');
-    let replyText = '', transcript = '';
-
-    try {
-      if (active) active.status = 'מעבד שמע ב-Gemini ומנסח תשובה';
-      const processed = await processCallerAudio(audioBase64);
-      transcript = processed.transcript;
-      replyText = processed.replyText;
-
-      if (replyText.startsWith('SEARCH_REQUEST')) {
-        if (active) active.status = 'מבצע חיפוש Google עדכני';
-        replyText = await answerWithWebSearch(replyText.replace('SEARCH_REQUEST', '').trim(), audioBase64);
+    let firstTurn = true;
+    while (true) {
+      const active = activeCalls.get(activeKey);
+      if (active) {
+        active.lastActivity = Date.now();
+        active.status = 'ממתין להקלטה מהמתקשר';
       }
-    } catch (e) {
-      logDetailedError('Gemini processing', e);
-      replyText = (e.status === 503 || e.status === 429)
-        ? 'מצטערים אני עמוס כרגע נסה שוב עוד מעט'
-        : e.status === 408
-        ? 'מצטערים לקח יותר מדי זמן לענות נסה שוב'
-        : 'מצטער הייתה תקלה בעיבוד השאלה אפשר לנסות שוב';
-    }
 
-    replyText = sanitizeForYemot(replyText) || 'מצטער לא הצלחתי לנסח תשובה נסה שוב';
-    await addConversationEntry({ phone: callerPhone, callId, userText: transcript, geminiText: replyText });
+      const prompt = firstTurn
+        ? 'אנא אמור את שאלתך אחרי הצפצוף ולסיום ההקלטה הקש סולמית'
+        : 'אמור שאלה נוספת ולסיום הקש סולמית או כוכבית ליציאה';
+      firstTurn = false;
 
-    try {
-      if (active) active.status = 'משמיע תשובה למתקשר';
-      await call.id_list_message([{ type: 'text', data: replyText }], { prependToNextAction: true });
-    } catch (e) {
-      logDetailedError('playback', e);
-      await call.id_list_message([{ type: 'text', data: 'מצטער הייתה תקלה בהקראת התשובה' }], { prependToNextAction: true });
+      const recordPath = await call.read(
+        [{ type: 'text', data: prompt }],
+        'record',
+        { min_length: 1, max_length: 60, no_confirm_menu: true }
+      );
+
+      if (!recordPath || recordPath === 'None') {
+        return call.id_list_message([{ type: 'text', data: 'תודה רבה ולהתראות' }]);
+      }
+
+      if (active) {
+        active.lastActivity = Date.now();
+        active.status = 'הקלטה התקבלה — מוריד שמע';
+      }
+
+      let audioBuffer;
+      try {
+        audioBuffer = await downloadYemotRecording(recordPath);
+      } catch (e) {
+        logDetailedError('recording download', e);
+        await call.id_list_message([{ type: 'text', data: 'תקלה בהורדת ההקלטה נסה שוב' }], { prependToNextAction: true });
+        continue;
+      }
+
+      const audioBase64 = audioBuffer.toString('base64');
+      let replyText = '', transcript = '';
+
+      try {
+        if (active) {
+          active.lastActivity = Date.now();
+          active.status = 'מעבד שמע ב-Gemini ומנסח תשובה';
+        }
+        const processed = await processCallerAudio(audioBase64, sessionTurns);
+        transcript = processed.transcript;
+        replyText = processed.replyText;
+
+        if (replyText.startsWith('SEARCH_REQUEST')) {
+          if (active) active.status = 'מבצע חיפוש Google עדכני';
+          replyText = await answerWithWebSearch(replyText.replace('SEARCH_REQUEST', '').trim(), audioBase64, sessionTurns);
+        }
+      } catch (e) {
+        logDetailedError('Gemini processing', e);
+        replyText = (e.status === 503 || e.status === 429)
+          ? 'מצטערים אני עמוס כרגע נסה שוב עוד מעט'
+          : e.status === 408
+          ? 'מצטערים לקח יותר מדי זמן לענות נסה שוב'
+          : 'מצטער הייתה תקלה בעיבוד השאלה אפשר לנסות שוב';
+      }
+
+      replyText = sanitizeForYemot(replyText) || 'מצטער לא הצלחתי לנסח תשובה נסה שוב';
+
+      // Save to active call session turns so subsequent questions remember everything!
+      sessionTurns.push({ user: transcript, reply: replyText });
+
+      await addConversationEntry({ phone: callerPhone, callId, userText: transcript, geminiText: replyText });
+
+      try {
+        if (active) {
+          active.lastActivity = Date.now();
+          active.status = 'משמיע תשובה למתקשר';
+        }
+        await call.id_list_message([{ type: 'text', data: replyText }], { prependToNextAction: true });
+      } catch (e) {
+        logDetailedError('playback', e);
+        await call.id_list_message([{ type: 'text', data: 'מצטער הייתה תקלה בהקראת התשובה' }], { prependToNextAction: true });
+      }
     }
+  } finally {
+    // Guarantees activeCalls is always cleaned up when caller hangs up!
+    activeCalls.delete(activeKey);
   }
 }
 
@@ -355,18 +395,39 @@ router.all('/yemot', callHandler);
 // Crucial: Mount the router on the Express app
 app.use('/', router);
 
-// Conversations API
-app.get('/api/conversations', (req, res) => res.json({
-  conversations: conversationLog,
-  activeCalls: Array.from(activeCalls.values()),
-  totalMessages: conversationLog.length,
-  totalCallers: new Set(conversationLog.map(x => x.phone)).size,
-  models: MODEL_NAMES,
-  serverTime: new Date().toISOString()
-}));
+// Password verification API
+app.post('/api/verify-auth', (req, res) => {
+  const pass = req.body?.password;
+  if (pass === DASHBOARD_PASSWORD) {
+    res.json({ ok: true });
+  } else {
+    res.status(401).json({ ok: false, error: 'סיסמה שגויה' });
+  }
+});
 
-// Quick AI test API
+// Conversations API - protected with password check
+app.get('/api/conversations', (req, res) => {
+  const key = req.headers['x-dashboard-key'] || req.query.key;
+  if (key !== DASHBOARD_PASSWORD) {
+    return res.status(401).json({ error: 'דרושה סיסמת גישה לצפייה בנתונים' });
+  }
+
+  res.json({
+    conversations: conversationLog,
+    activeCalls: Array.from(activeCalls.values()),
+    totalMessages: conversationLog.length,
+    totalCallers: new Set(conversationLog.map(x => x.phone)).size,
+    models: MODEL_NAMES,
+    serverTime: new Date().toISOString()
+  });
+});
+
+// Quick AI test API - protected
 app.post('/api/test-ai', async (req, res) => {
+  const key = req.headers['x-dashboard-key'] || req.query.key;
+  if (key !== DASHBOARD_PASSWORD) {
+    return res.status(401).json({ ok: false, error: 'דרושה סיסמת גישה' });
+  }
   try {
     const text = req.body?.prompt || 'שלום, בדוק תקינות';
     const result = await generateWithRetry([{ text }]);
@@ -376,7 +437,7 @@ app.post('/api/test-ai', async (req, res) => {
   }
 });
 
-// Health check endpoint for Render
+// Health check endpoint for Render (public)
 app.get('/health', (req, res) => res.json({
   ok: true,
   status: 'online',
@@ -384,7 +445,7 @@ app.get('/health', (req, res) => res.json({
   models: MODEL_NAMES
 }));
 
-// Dashboard web interface
+// Dashboard web interface with password lock modal
 app.get('/', (req, res) => {
   res.type('html').send(`<!doctype html>
 <html lang="he" dir="rtl">
@@ -401,6 +462,7 @@ app.get('/', (req, res) => {
       --text-dim: #94a3b8;
       --success: #22c55e;
       --border: #334155;
+      --danger: #ef4444;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -419,7 +481,7 @@ app.get('/', (req, res) => {
       padding-bottom: 16px;
       border-bottom: 1px solid var(--border);
     }
-    h1 { font-size: 1.6rem; color: var(--accent); }
+    h1 { font-size: 1.5rem; color: var(--accent); }
     .badge {
       display: inline-flex;
       align-items: center;
@@ -428,16 +490,16 @@ app.get('/', (req, res) => {
       color: var(--success);
       padding: 6px 14px;
       border-radius: 999px;
-      font-size: 0.9rem;
+      font-size: 0.85rem;
       font-weight: bold;
     }
     .dot { width: 8px; height: 8px; background: var(--success); border-radius: 50%; display: inline-block; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
     .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
-    .card h3 { font-size: 0.9rem; color: var(--text-dim); margin-bottom: 8px; }
-    .card .val { font-size: 1.5rem; font-weight: bold; color: var(--text); }
-    .section-title { font-size: 1.2rem; margin: 24px 0 12px 0; color: var(--text); }
-    .chat-box { background: var(--card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+    .card h3 { font-size: 0.85rem; color: var(--text-dim); margin-bottom: 8px; }
+    .card .val { font-size: 1.4rem; font-weight: bold; color: var(--text); }
+    .section-title { font-size: 1.15rem; margin: 24px 0 12px 0; color: var(--text); }
+    .chat-box { background: var(--card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; max-height: 550px; overflow-y: auto; }
     .chat-item { padding: 16px; border-bottom: 1px solid var(--border); }
     .chat-item:last-child { border-bottom: none; }
     .meta { font-size: 0.8rem; color: var(--text-dim); margin-bottom: 6px; display: flex; justify-content: space-between; }
@@ -446,7 +508,7 @@ app.get('/', (req, res) => {
     .empty { padding: 32px; text-align: center; color: var(--text-dim); }
     .test-box { margin-top: 24px; background: var(--card); padding: 18px; border-radius: 12px; border: 1px solid var(--border); }
     .input-row { display: flex; gap: 8px; margin-top: 10px; }
-    input[type="text"] {
+    input[type="text"], input[type="password"] {
       flex: 1; padding: 10px 14px; background: #0f172a; border: 1px solid var(--border);
       border-radius: 8px; color: #fff; font-size: 0.95rem;
     }
@@ -455,25 +517,57 @@ app.get('/', (req, res) => {
       border-radius: 8px; font-weight: bold; cursor: pointer; transition: 0.2s;
     }
     button:hover { opacity: 0.9; }
+    .btn-lock { background: transparent; border: 1px solid var(--border); color: var(--text-dim); padding: 6px 12px; font-size: 0.8rem; }
+    .btn-lock:hover { color: var(--danger); border-color: var(--danger); }
+    
+    /* Lock modal overlay */
+    #lockModal {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(15, 23, 42, 0.95); backdrop-filter: blur(8px);
+      display: flex; align-items: center; justify-content: center; z-index: 1000;
+    }
+    .modal-card {
+      background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+      padding: 32px; max-width: 400px; width: 90%; text-align: center; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5);
+    }
+    .modal-card h2 { margin-bottom: 8px; color: var(--accent); }
+    .modal-card p { font-size: 0.9rem; color: var(--text-dim); margin-bottom: 20px; }
+    .modal-card input { width: 100%; margin-bottom: 12px; text-align: center; font-size: 1.1rem; letter-spacing: 2px; }
+    .modal-card button { width: 100%; padding: 12px; font-size: 1rem; }
+    .error-msg { color: var(--danger); font-size: 0.85rem; margin-top: 8px; display: none; }
   </style>
 </head>
 <body>
-  <div class="container">
+  <!-- Lock Modal -->
+  <div id="lockModal">
+    <div class="modal-card">
+      <h2>מרכז בקרה מאובטח</h2>
+      <p>הנתונים ויומן השיחות מוגנים. אנא הזן סיסמת גישה:</p>
+      <input type="password" id="passInput" placeholder="סיסמה..." onkeydown="if(event.key==='Enter') verifyLogin()">
+      <button onclick="verifyLogin()">כניסה למערכת</button>
+      <div id="loginErr" class="error-msg">סיסמה שגויה. נסה שוב.</div>
+    </div>
+  </div>
+
+  <div class="container" id="mainContent" style="display: none;">
     <header>
       <div>
         <h1>קו טלפון אישי עם בינה מלאכותית</h1>
-        <p style="color: var(--text-dim); font-size: 0.9rem;">מחובר ל-Gemini 3.8 Flash ו-ימות המשיח</p>
+        <p style="color: var(--text-dim); font-size: 0.9rem;">מחובר ל-Gemini 3.8 Flash, ימות המשיח וזיכרון שיחות</p>
       </div>
-      <div class="badge"><span class="dot"></span> המערכת פעילה</div>
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <div class="badge"><span class="dot"></span> המערכת פעילה</div>
+        <button class="btn-lock" onclick="logout()">נעילה</button>
+      </div>
     </header>
 
     <div class="grid">
       <div class="card">
-        <h3>מודל AI ראשי</h3>
+        <h3>מודל AI פעיל</h3>
         <div class="val" style="font-size: 1.1rem; color: var(--accent);">${MODEL_NAMES[0] || 'Gemini'}</div>
       </div>
       <div class="card">
-        <h3>סה״כ הודעות</h3>
+        <h3>סה״כ פניות</h3>
         <div class="val" id="totalMsg">-</div>
       </div>
       <div class="card">
@@ -486,14 +580,14 @@ app.get('/', (req, res) => {
       </div>
     </div>
 
-    <div class="section-title">יומן שיחות אחרונות</div>
+    <div class="section-title">יומן שיחות ותמלול בזמן אמת</div>
     <div class="chat-box" id="chatBox">
       <div class="empty">טוען נתונים...</div>
     </div>
 
     <div class="test-box">
       <h3 style="color: var(--text); font-size: 1rem;">בדיקת AI ישירה</h3>
-      <p style="color: var(--text-dim); font-size: 0.85rem;">בדיקת תגובת Gemini ישירות מהדפדפן:</p>
+      <p style="color: var(--text-dim); font-size: 0.85rem;">בדיקת מענה ישירות מ-Gemini דרך השרת:</p>
       <div class="input-row">
         <input type="text" id="testPrompt" placeholder="הקלד שאלה לבדיקה...">
         <button onclick="testAi()">שלח לבדיקה</button>
@@ -503,9 +597,80 @@ app.get('/', (req, res) => {
   </div>
 
   <script>
-    async function loadData() {
+    let authKey = localStorage.getItem('dash_key') || '';
+
+    async function checkAuth() {
+      if (!authKey) {
+        showLogin();
+        return;
+      }
       try {
-        const res = await fetch('/api/conversations');
+        const res = await fetch('/api/conversations', {
+          headers: { 'x-dashboard-key': authKey }
+        });
+        if (res.ok) {
+          unlock();
+          loadData();
+        } else {
+          showLogin();
+        }
+      } catch {
+        showLogin();
+      }
+    }
+
+    function showLogin() {
+      document.getElementById('lockModal').style.display = 'flex';
+      document.getElementById('mainContent').style.display = 'none';
+      document.getElementById('passInput').focus();
+    }
+
+    function unlock() {
+      document.getElementById('lockModal').style.display = 'none';
+      document.getElementById('mainContent').style.display = 'block';
+    }
+
+    async function verifyLogin() {
+      const pass = document.getElementById('passInput').value;
+      const err = document.getElementById('loginErr');
+      err.style.display = 'none';
+      try {
+        const res = await fetch('/api/verify-auth', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ password: pass })
+        });
+        const d = await res.json();
+        if (d.ok) {
+          authKey = pass;
+          localStorage.setItem('dash_key', authKey);
+          unlock();
+          loadData();
+        } else {
+          err.style.display = 'block';
+        }
+      } catch (e) {
+        err.innerText = 'שגיאת תקשורת';
+        err.style.display = 'block';
+      }
+    }
+
+    function logout() {
+      localStorage.removeItem('dash_key');
+      authKey = '';
+      showLogin();
+    }
+
+    async function loadData() {
+      if (!authKey) return;
+      try {
+        const res = await fetch('/api/conversations', {
+          headers: { 'x-dashboard-key': authKey }
+        });
+        if (res.status === 401) {
+          logout();
+          return;
+        }
         const data = await res.json();
         document.getElementById('totalMsg').innerText = data.totalMessages;
         document.getElementById('totalCallers').innerText = data.totalCallers;
@@ -517,13 +682,13 @@ app.get('/', (req, res) => {
           return;
         }
 
-        box.innerHTML = data.conversations.slice(-20).reverse().map(c => \`
+        box.innerHTML = data.conversations.slice(-25).reverse().map(c => \`
           <div class="chat-item">
             <div class="meta">
               <span>טלפון: \${c.phone}</span>
               <span>\${new Date(c.time).toLocaleTimeString('he-IL')}</span>
             </div>
-            <div class="user-msg"><strong>מתקשר:</strong> \${c.user || '(שמע ללא תמלול)'}</div>
+            <div class="user-msg"><strong>מתקשר:</strong> \${c.user || '(הקלטה ללא תמלול)'}</div>
             <div class="ai-msg"><strong>AI:</strong> \${c.gemini}</div>
           </div>
         \`).join('');
@@ -540,7 +705,7 @@ app.get('/', (req, res) => {
       try {
         const res = await fetch('/api/test-ai', {
           method: 'POST',
-          headers: {'Content-Type': 'application/json'},
+          headers: {'Content-Type': 'application/json', 'x-dashboard-key': authKey},
           body: JSON.stringify({ prompt })
         });
         const d = await res.json();
@@ -550,8 +715,10 @@ app.get('/', (req, res) => {
       }
     }
 
-    loadData();
-    setInterval(loadData, 3000);
+    checkAuth();
+    setInterval(() => {
+      if (authKey) loadData();
+    }, 3000);
   </script>
 </body>
 </html>`);
@@ -582,24 +749,14 @@ async function configureYemotStructure() {
   }
 
   try {
-    console.log(`Setting IVR extension /1 to ${publicUrl}/yemot...`);
-    await updateExtension('ivr2:/1', { type: 'api', api_link: publicUrl + '/yemot' });
-    console.log('IVR extension /1 successfully connected to ' + publicUrl + '/yemot');
-
-    const voiceMap = (process.env.YEMOT_VOICE_OPTIONS || '1:Elik_2100,2:Jacob,3:ymMale').split(',');
-    for (const item of voiceMap) {
-      const [extension, voice] = item.split(':');
-      if (!extension || !voice) continue;
-      await updateExtension(`ivr2:/2/${extension}`, {
-        type: 'add_id_to_list',
-        add_id_to_list_location_list: '/ivr',
-        add_id_to_list_key: 'voice',
-        add_id_to_list_value: voice,
-        add_id_to_list_value_change: 'yes',
-        add_id_to_list_end_goto: '/1',
-        add_id_to_list_error_end_goto: '/2'
-      });
-    }
+    console.log(`Setting IVR extension /1 to ${publicUrl}/yemot with wait audio...`);
+    await updateExtension('ivr2:/1', {
+      type: 'api',
+      api_link: publicUrl + '/yemot',
+      api_wait_play: 'yes',
+      api_timeout: '25'
+    });
+    console.log('IVR extension /1 successfully configured with wait music!');
   } catch (err) {
     console.error('configureYemotStructure error:', err.message);
   }

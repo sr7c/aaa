@@ -14,5 +14,9 @@ services:
         sync: false
       - key: GEMINI_MODELS
         value: gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash
+      - key: DASHBOARD_PASSWORD
+        value: "1234"
+      - key: REQUEST_TIMEOUT_MS
+        value: "25000"
       - key: PUBLIC_BASE_URL
         sync: false
