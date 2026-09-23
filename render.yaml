@@ -19,8 +19,8 @@ services:
       - key: DASHBOARD_PASSWORD
         value: "1234"
       - key: REQUEST_TIMEOUT_MS
-        value: "60000"
+        value: "55000"
       - key: PER_MODEL_TIMEOUT_MS
-        value: "25000"
+        value: "45000"
       - key: PUBLIC_BASE_URL
         sync: false
