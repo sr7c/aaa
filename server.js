@@ -19,11 +19,11 @@ if (!apiKeys.length) {
   console.warn('Gemini is not configured yet. Set GEMINI_API_KEYS.');
 }
 
-const MODEL_NAMES = (process.env.GEMINI_MODELS || 'gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash')
+const MODEL_NAMES = (process.env.GEMINI_MODELS || 'gemini-3.5-flash-lite,gemini-flash-lite-latest,gemini-3.8-flash,gemini-3.6-flash')
   .split(',').map(x => x.trim()).filter(Boolean);
 
-const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 60000);
-const PER_MODEL_TIMEOUT_MS = Number(process.env.PER_MODEL_TIMEOUT_MS || 25000);
+const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 30000);
+const PER_MODEL_TIMEOUT_MS = Number(process.env.PER_MODEL_TIMEOUT_MS || 8000);
 const DASHBOARD_PASSWORD = (process.env.DASHBOARD_PASSWORD || '1234').trim();
 
 const CONTENT_FILTER_INSTRUCTION = `כלל סינון תוכן מחייב: אין לספק, לעודד או לפרט תוכן שאינו תואם ערכי צניעות וחינוך.
