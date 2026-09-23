@@ -173,12 +173,9 @@ async function generateWithRetry(contents, useWebSearch = false) {
         );
       } catch (e) {
         lastError = e;
-        const status = e.status || (e.message && e.message.includes('503') ? 503 : 0);
-        console.warn(`Attempt failed on ${MODEL_NAMES[mi]} (${status || e.message}). Fast-switching to next model...`);
-        if (![404, 503, 429, 500, 408].includes(status) && !e.message?.includes('503') && !e.isTimeout) {
-          throw e;
-        }
-        await new Promise(r => setTimeout(r, 100));
+        const errDesc = e.status || e.message || 'error';
+        console.warn(`Attempt failed on ${MODEL_NAMES[mi]} (${errDesc}). Fast-switching to next model...`);
+        await new Promise(r => setTimeout(r, 50));
       }
     }
   }
@@ -335,6 +332,12 @@ async function callHandler(call) {
       } catch (e) {
         logDetailedError('recording download', e);
         await call.id_list_message([{ type: 'text', data: 'תקלה בהורדת ההקלטה נסה שוב' }], { prependToNextAction: true });
+        continue;
+      }
+
+      if (!audioBuffer || audioBuffer.length < 500) {
+        console.warn(`Empty or tiny audio recording received (${audioBuffer?.length || 0} bytes).`);
+        await call.id_list_message([{ type: 'text', data: 'לא שמעתי שאלה אנא נסה לדבר אחרי הצפצוף' }], { prependToNextAction: true });
         continue;
       }
 
