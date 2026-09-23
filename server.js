@@ -359,7 +359,9 @@ async function callHandler(call) {
         }
       } catch (e) {
         logDetailedError('Gemini processing', e);
-        replyText = (e.status === 503 || e.status === 429)
+        replyText = (e.message?.includes('SAFETY') || e.statusText?.includes('SAFETY'))
+          ? 'היי עצור הקו מסונן ולא ניתן לדבר איתו על תוכן שאינו מתאים לערכי הצניעות והחינוך'
+          : (e.status === 503 || e.status === 429)
           ? 'מצטערים אני עמוס כרגע נסה שוב עוד מעט'
           : e.status === 408
           ? 'מצטערים לקח יותר מדי זמן לענות נסה שוב'
