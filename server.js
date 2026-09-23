@@ -22,8 +22,8 @@ if (!apiKeys.length) {
 const MODEL_NAMES = (process.env.GEMINI_MODELS || 'gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash')
   .split(',').map(x => x.trim()).filter(Boolean);
 
-const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 32000);
-const PER_MODEL_TIMEOUT_MS = Number(process.env.PER_MODEL_TIMEOUT_MS || 12000);
+const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 60000);
+const PER_MODEL_TIMEOUT_MS = Number(process.env.PER_MODEL_TIMEOUT_MS || 25000);
 const DASHBOARD_PASSWORD = (process.env.DASHBOARD_PASSWORD || '1234').trim();
 
 const CONTENT_FILTER_INSTRUCTION = `כלל סינון תוכן מחייב: אין לספק, לעודד או לפרט תוכן שאינו תואם ערכי צניעות וחינוך.
@@ -317,7 +317,7 @@ async function callHandler(call) {
       const recordPath = await call.read(
         [{ type: 'text', data: prompt }],
         'record',
-        { min_length: 1, max_length: 90, no_confirm_menu: true }
+        { min_length: 1, no_confirm_menu: true }
       );
 
       if (!recordPath || recordPath === 'None') {
@@ -753,7 +753,7 @@ async function configureYemotStructure() {
       api_link: publicUrl + '/yemot',
       api_wait_play: 'yes',
       api_wait_answer_music_on_hold: 'yes',
-      api_timeout: '25',
+      api_timeout: '60',
       tts_rate: '2',
       rate: '2'
     });
