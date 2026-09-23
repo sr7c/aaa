@@ -13,7 +13,7 @@ if (!apiKeys.length) {
   console.warn('Gemini is not configured yet. Set GEMINI_API_KEYS.');
 }
 
-const MODEL_NAMES = (process.env.GEMINI_MODELS || 'gemini-3.1-flash,gemini-3-flash,gemini-2.5-flash')
+const MODEL_NAMES = (process.env.GEMINI_MODELS || 'gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash')
   .split(',').map(x => x.trim()).filter(Boolean);
 const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 10000);
 
@@ -138,23 +138,33 @@ async function generateWithRetry(contents, useWebSearch=false) {
   throw lastError;
 }
 
-const YEMOT_API_KEY = (process.env.YEMOT_API_KEY || '').trim();
-const YEMOT_API_USERNAME = (process.env.YEMOT_API_USERNAME || '').trim();
-const YEMOT_API_PASSWORD = (process.env.YEMOT_API_PASSWORD || '').trim();
-function yemotToken() {
-  if (YEMOT_API_KEY) return YEMOT_API_KEY;
-  if (YEMOT_API_USERNAME && YEMOT_API_PASSWORD) return `${YEMOT_API_USERNAME}:${YEMOT_API_PASSWORD}`;
-  throw Object.assign(new Error('Yemot authentication is not configured'), {status: 401});
+class YemotApiCompat {
+  constructor(username, password, apiKey) {
+    this.username = String(username || '').trim();
+    this.password = String(password || '').trim();
+    this.apiKey = String(apiKey || '').trim();
+  }
+  token() {
+    if (this.apiKey) return this.apiKey;
+    if (this.username && this.password) return this.username + ':' + this.password;
+    throw Object.assign(new Error('Yemot credentials are not configured'), {status:401});
+  }
+  async download_file(path) {
+    const url = new URL('https://www.call2all.co.il/ym/api/DownloadFile');
+    url.searchParams.set('token', this.token());
+    url.searchParams.set('path', path);
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw Object.assign(new Error('Yemot DownloadFile HTTP ' + response.status), {status:response.status});
+    }
+    return { data: Buffer.from(await response.arrayBuffer()) };
+  }
 }
-async function downloadYemotFile(path) {
-  const url = new URL('https://www.call2all.co.il/ym/api/DownloadFile');
-  url.searchParams.set('token', yemotToken());
-  url.searchParams.set('path', path);
-  const r = await fetch(url, {headers: YEMOT_API_KEY ? {authorization: YEMOT_API_KEY} : {}});
-  if (!r.ok) throw Object.assign(new Error(`Yemot DownloadFile HTTP ${r.status}`), {status:r.status});
-  return Buffer.from(await r.arrayBuffer());
-}
-
+const yemotApi = new YemotApiCompat(
+  process.env.YEMOT_API_USERNAME,
+  process.env.YEMOT_API_PASSWORD,
+  process.env.YEMOT_API_KEY
+);
 const router = YemotRouter({
   printLog: true,
   defaults: { removeInvalidChars: true },
@@ -168,7 +178,6 @@ async function answerNormalQuestion(audioBase64) {
 
 זו הקלטה של שאלה מהמתקשר. האזן להקלטה, הבן את הדיבור בעצמך וענה על השאלה.
 ענה בשפה שבה המתקשר דיבר. התשובה מיועדת להקראה בטלפון.
-אם המתקשר מבקש במפורש חיפוש באינטרנט או מידע עדכני מהאינטרנט, החזר בדיוק SEARCH_REQUEST בלבד.
 אל תצטט תמלול. אם קיימת במערכת דרישה לאורך תשובה, פעל לפיה.`;
   const result = await generateWithRetry([...audioParts(audioBase64), {text:prompt}]);
   return result.response.text();
@@ -220,9 +229,9 @@ async function callHandler(call) {
     const active=activeCalls.get(activeKey); if(active) active.status='הקלטה התקבלה — מעבד';
     let audioBuffer;
     try {
-      const response=await withTimeout(downloadYemotFile('ivr2:'+recordPath),
-        REQUEST_TIMEOUT_MS,'Yemot DownloadFile');
-      audioBuffer=response;
+      const response=await withTimeout(yemotApi.download_file('ivr2:'+recordPath),
+        REQUEST_TIMEOUT_MS,'yemotApi.download_file');
+      audioBuffer=response.data;
     } catch(e) {
       logDetailedError('recording download',e);
       continue;
@@ -233,7 +242,7 @@ async function callHandler(call) {
       if(active) active.status='שולח Audio ל-Gemini וממתין לתשובה';
       try { transcript=await transcribeForDashboard(audioBase64); } catch { transcript='לא ניתן היה לתמלל את ההקלטה'; }
       const firstText=(await answerNormalQuestion(audioBase64)).trim();
-      if(firstText === 'SEARCH_REQUEST' || firstText.startsWith('SEARCH_REQUEST\n')) replyText=await answerWithWebSearch(audioBase64);
+      if(firstText.startsWith('SEARCH_REQUEST')) replyText=await answerWithWebSearch(audioBase64);
       else replyText=firstText;
     } catch(e) {
       logDetailedError('Gemini processing',e);
