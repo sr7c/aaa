@@ -1,12 +1,16 @@
-# הגדרה
+# מה צריך להוסיף
 
 הפרויקט כבר כולל את הקוד והמבנה.
 
-יש לספק ב-Render Environment Variables:
+צריך לספק בעצמך:
 1. GEMINI_API_KEYS
-2. YEMOT_API_KEY
-3. PUBLIC_BASE_URL של השירות ב-Render
-4. אופציונלי: SUPABASE_URL ו-SUPABASE_KEY לזיכרון קבוע
-5. אופציונלי: AI_SYSTEM_INSTRUCTION
+2. YEMOT_API_USERNAME
+3. YEMOT_API_PASSWORD
+4. YEMOT_API_KEY
+5. PUBLIC_BASE_URL של השירות ב-Render
+6. אופציונלי: SUPABASE_URL ו-SUPABASE_KEY לזיכרון קבוע
+7. אופציונלי: הוראת AI מותאמת ב-AI_SYSTEM_INSTRUCTION
 
-הקוד תומך גם ב-YEMOT_API_USERNAME ו-YEMOT_API_PASSWORD כ-fallback, אך API Key קבוע מספיק לפעולות ה-Yemot API שהפרויקט מבצע. הסודות אינם נשמרים ב-GitHub.
+ב-GitHub וב-Render אין לשמור סודות בתוך הקוד. משתמשים ב-Environment Variables.
+
+אם משתמשים ב-GPT עם חיבור GitHub/Render, אפשר לתת לו את ה-ZIP ולבקש שימקם את הקבצים בריפו, יחבר Render, ויבקש ממך את הערכים החסרים אחד-אחד.
