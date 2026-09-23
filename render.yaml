@@ -13,7 +13,7 @@ services:
       - key: YEMOT_API_KEY
         sync: false
       - key: GEMINI_MODELS
-        value: gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite,gemini-flash-lite-latest
+        value: gemini-3-flash-preview,gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash,gemini-3.5-flash-lite
       - key: MODEL_COOLDOWN_MS
         value: "3600000"
       - key: DASHBOARD_PASSWORD
@@ -21,6 +21,6 @@ services:
       - key: REQUEST_TIMEOUT_MS
         value: "55000"
       - key: PER_MODEL_TIMEOUT_MS
-        value: "45000"
+        value: "20000"
       - key: PUBLIC_BASE_URL
         sync: false
