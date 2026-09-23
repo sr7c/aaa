@@ -298,11 +298,6 @@ async function callHandler(call) {
   const sessionTurns = [];
 
   try {
-    // 1. Professional Welcome Announcement on entrance to the line
-    const welcomeAnnouncement = process.env.WELCOME_MESSAGE || 
-      'שלום וברוכים הבאים לקו הטלפון האישי עם בינה מלאכותית כאן תוכלו לשאול כל שאלה להתייעץ ולנהל שיחה חופשית';
-    await call.id_list_message([{ type: 'text', data: sanitizeForYemot(welcomeAnnouncement) }]);
-
     let firstTurn = true;
     while (true) {
       const active = activeCalls.get(activeKey);
@@ -311,8 +306,11 @@ async function callHandler(call) {
         active.status = 'ממתין להקלטה מהמתקשר';
       }
 
+      const welcomeAnnouncement = process.env.WELCOME_MESSAGE || 
+        'שלום וברוכים הבאים לקו הטלפון האישי עם בינה מלאכותית כאן תוכלו לשאול כל שאלה להתייעץ ולנהל שיחה חופשית';
+
       const prompt = firstTurn
-        ? 'אנא אמור את שאלתך אחרי הצפצוף ולסיום ההקלטה הקש סולמית'
+        ? `${sanitizeForYemot(welcomeAnnouncement)} אנא אמור את שאלתך אחרי הצפצוף ולסיום ההקלטה הקש סולמית`
         : 'אמור שאלה נוספת ולסיום הקש סולמית או כוכבית ליציאה';
       firstTurn = false;
 
